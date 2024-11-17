@@ -1,19 +1,13 @@
-# 🎈 Blank app template
+# Diabetes Support App
 
-A simple Streamlit app template for you to modify!
+A comprehensive diabetes management application built with Streamlit.
 
-[![Open in Streamlit](https://static.streamlit.io/badges/streamlit_badge_black_white.svg)](https://blank-app-template.streamlit.app/)
+## Features
+- Medication tracking
+- Glucose monitoring
+- Educational resources
+- Community support
 
-### How to run it on your own machine
-
-1. Install the requirements
-
-   ```
-   $ pip install -r requirements.txt
-   ```
-
-2. Run the app
-
-   ```
-   $ streamlit run streamlit_app.py
-   ```
+## Installation
+```bash
+pip install -r requirements.txt
