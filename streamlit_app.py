@@ -1,31 +1,29 @@
 import streamlit as st
-import datetime
+from datetime import datetime, timedelta, time
 import pandas as pd
-import plotly.graph_objects as go
-from datetime import datetime, timedelta
+import plotly.express as px
 import sqlite3
 from pathlib import Path
 import calendar
-import plotly.express as px
-from datetime import time
 
+# Database Functions
 def create_database_connection():
-    """Create and return a database connection"""
     try:
         data_dir = Path("data")
         data_dir.mkdir(exist_ok=True)
         db_path = data_dir / "diabetes_app.db"
         conn = sqlite3.connect(str(db_path))
-        
-        # Create tables when connecting
         create_tables(conn)
-        
         return conn
     except Exception as e:
         st.error(f"Database connection error: {e}")
         return None
-# Database Setup
+
 def create_tables(conn):
+    conn.execute('''CREATE TABLE IF NOT EXISTS users
+                 (user_id TEXT PRIMARY KEY,
+                  streak INTEGER DEFAULT 0)''')
+                  
     conn.execute('''CREATE TABLE IF NOT EXISTS medications
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id TEXT,
@@ -51,20 +49,26 @@ def create_tables(conn):
 def calculate_streak(conn, user_id):
     cursor = conn.cursor()
     cursor.execute("""
-        SELECT date FROM medications 
+        SELECT date 
+        FROM medications 
         WHERE user_id = ? 
         ORDER BY date DESC
     """, (user_id,))
+    
     dates = [row[0] for row in cursor.fetchall()]
     
     if not dates:
         return 0
-        
-    streak = 1
-    current_date = datetime.strptime(dates[0], '%Y-%m-%d')
     
-    for date_str in dates[1:]:
-        date = datetime.strptime(date_str, '%Y-%m-%d')
+    streak = 1
+    current_date = datetime.strptime(dates[0], '%Y-%m-%d').date()
+    yesterday = datetime.now().date() - timedelta(days=1)
+    
+    if current_date < yesterday:
+        return 0
+    
+    for i in range(1, len(dates)):
+        date = datetime.strptime(dates[i], '%Y-%m-%d').date()
         if (current_date - date).days == 1:
             streak += 1
             current_date = date
@@ -73,342 +77,430 @@ def calculate_streak(conn, user_id):
     
     return streak
 
+# Component Functions
 def medication_tracker():
     st.header("Medication Tracker")
     
-    # Current time display
     current_time = datetime.now().strftime("%H:%M")
     st.subheader(f"Current Time: {current_time}")
     
-    # Calendar view
-    col1, col2 = st.columns([2, 1])
+    col1, col2 = st.columns([3, 1])
     with col1:
         selected_date = st.date_input("Select Date", datetime.now())
-        
-    # Medication Schedule
-    st.subheader("Medication Schedule")
-    conn = create_database_connection()
     
-    if conn is not None:
-        # Display scheduled medications
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT med_name, scheduled_time, dosage 
-            FROM medication_schedule 
-            WHERE user_id = ?
-        """, (st.session_state.get('user_id', 'default_user'),))
-        
-        scheduled_meds = cursor.fetchall()
-        
-        for med in scheduled_meds:
-            med_name, scheduled_time, dosage = med
-            st.write(f"{med_name} - {scheduled_time} - {dosage} units")
+    med_options = ["Insulin", "Metformin", "Glipizide", "Januvia", "Other"]
     
-    # Add new medication
-    with st.expander("Log New Medication"):
-        med_name = st.text_input("Medication Name")
-        dosage = st.number_input("Dosage", min_value=0.0)
-        time_taken = st.time_input("Time Taken")
-        
-        if st.button("Log Medication"):
-            if conn is not None:
-                try:
-                    with conn:
-                        conn.execute("""
-                            INSERT INTO medications 
-                            (user_id, med_name, dosage, time_taken, date)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (st.session_state.get('user_id', 'default_user'),
-                              med_name, dosage, time_taken,
-                              selected_date))
-                    st.success("Medication logged successfully!")
-                except Exception as e:
-                    st.error(f"Error logging medication: {e}")
-                finally:
-                    conn.close()
+    # Remove the expander here and just show the form directly
+    st.subheader("Log New Medication")
+    med_name = st.selectbox("Medication Name", med_options)
+    if med_name == "Other":
+        med_name = st.text_input("Enter medication name")
+    dosage = st.number_input("Dosage", min_value=0.0)
+    time_taken = st.time_input("Time Taken")
+    
     if st.button("Log Medication"):
-        if conn is not None:
+        conn = create_database_connection()
+        if conn:
             try:
+                time_taken_str = time_taken.strftime('%H:%M:%S')
                 with conn:
-                    # Convert time_taken to string format
-                    time_taken_str = time_taken.strftime('%H:%M:%S')
                     conn.execute("""
                         INSERT INTO medications 
                         (user_id, med_name, dosage, time_taken, date)
                         VALUES (?, ?, ?, ?, ?)
-                    """, (st.session_state.get('user_id', 'default_user'),
-                          med_name, dosage, time_taken_str,
-                          selected_date))
+                    """, (st.session_state.user_id, med_name, dosage, 
+                          time_taken_str, selected_date))
                 st.success("Medication logged successfully!")
             except Exception as e:
                 st.error(f"Error logging medication: {e}")
             finally:
                 conn.close()
 
+def display_glucose_chart():
+    conn = create_database_connection()
+    if conn:
+        df = pd.read_sql_query("""
+            SELECT glucose_level, reading_time 
+            FROM glucose_readings 
+            WHERE user_id = ? 
+            ORDER BY reading_time
+        """, conn, params=(st.session_state.user_id,))
+        
+        if not df.empty:
+            fig = px.line(df, x='reading_time', y='glucose_level',
+                         title='Glucose Levels Over Time')
+            fig.update_layout(
+                xaxis_title="Time",
+                yaxis_title="Glucose Level",
+                height=300
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No glucose readings available yet.")
+        conn.close()
+
 def glucose_tracker():
     st.subheader("Glucose Tracker")
     
-    # Glucose input
-    glucose_level = st.number_input("Glucose Level", min_value=0)
-    if st.button("Log Glucose"):
+    glucose_level = st.number_input("Glucose Level (mg/dL)", 
+                                  min_value=0, max_value=600)
+    
+    if st.button("Log Glucose Reading", key="log_glucose_button"):
         conn = create_database_connection()
-        if conn is not None:
+        if conn:
             try:
                 with conn:
                     conn.execute("""
                         INSERT INTO glucose_readings 
                         (user_id, glucose_level, reading_time)
                         VALUES (?, ?, ?)
-                    """, (st.session_state.get('user_id', 'default_user'),
-                          glucose_level, datetime.now()))
+                    """, (st.session_state.user_id, glucose_level, 
+                          datetime.now()))
                 st.success("Glucose level logged successfully!")
             except Exception as e:
                 st.error(f"Error logging glucose level: {e}")
             finally:
                 conn.close()
 
-def display_glucose_chart():
-    conn = create_database_connection()
-    if conn is not None:
-        df = pd.read_sql_query("""
-            SELECT glucose_level, reading_time 
-            FROM glucose_readings 
-            WHERE user_id = ? 
-            ORDER BY reading_time
-        """, conn, params=(st.session_state.get('user_id', 'default_user'),))
-        
-        if not df.empty:
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=df['reading_time'], 
-                                   y=df['glucose_level'],
-                                   mode='lines+markers'))
-            fig.update_layout(title='Glucose Levels Over Time',
-                            xaxis_title='Time',
-                            yaxis_title='Glucose Level')
-            st.plotly_chart(fig)
-        conn.close()
-
-def main():
-    st.set_page_config(page_title="Diabetes Support App", layout="wide")
-    
-    # Initialize session state
-    if 'user_id' not in st.session_state:
-        st.session_state['user_id'] = 'default_user'
-    
-    # Sidebar navigation
-    page = st.sidebar.selectbox(
-        "Navigation",
-        ["Home", "Medication Tracker", "Glucose Tracker", 
-         "Community", "Resources", "Settings"]
-    )
-    
-    if page == "Home":
-        st.title("Diabetes Support App")
-        st.write("Welcome to your diabetes management assistant!")
-        
-        # Display streak
-        conn = create_database_connection()
-        if conn is not None:
-            streak = calculate_streak(conn, st.session_state['user_id'])
-            st.metric("Current Streak", f"{streak} days")
-            conn.close()
-        
-        # Display today's schedule
-        st.subheader("Today's Schedule")
-        display_glucose_chart()
-        
-    elif page == "Medication Tracker":
-        medication_tracker()
-        
-    elif page == "Glucose Tracker":
-        glucose_tracker()
-        
-    elif page == "Community":
-        st.title("Community Support")
-        st.write("Connect with others in the diabetes community")
-        
-        # Add community features here
-        
-    elif page == "Resources":
-        st.title("Resources")
-        st.write("Educational materials and helpful information")
-        
-        # Add educational resources here
-        
-    elif page == "Settings":
-        st.title("Settings")
-        # Add settings options here
-        notification_time = st.time_input("Set Default Reminder Time")
-        if st.button("Save Settings"):
-            st.success("Settings saved successfully!")
-def get_medication_options():
-    return ["Insulin", "Metformin", "Glipizide", "Januvia", "Other"]
-
-def medication_tracker():
-    # ... existing code ...
-    with st.expander("Log New Medication"):
-        med_name = st.selectbox("Medication Name", get_medication_options())
-        if med_name == "Other":
-            med_name = st.text_input("Enter medication name")
-def display_medication_calendar(conn, user_id):
+def display_medication_calendar():
     st.subheader("Medication Calendar")
     
-    # Get current month's dates
     now = datetime.now()
     cal = calendar.monthcalendar(now.year, now.month)
     
-    # Get medication data for the month
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT date, med_name, dosage, time_taken 
-        FROM medications 
-        WHERE user_id = ? AND strftime('%Y-%m', date) = ?
-    """, (user_id, now.strftime('%Y-%m')))
-    med_data = cursor.fetchall()
-    
-    # Create calendar view
-    cols = st.columns(7)
-    for idx, day_name in enumerate(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']):
-        cols[idx].write(day_name)
-    
-    for week in cal:
-        cols = st.columns(7)
-        for idx, day in enumerate(week):
-            if day != 0:
-                # Check if medication was taken on this day
-                date_str = f"{now.year}-{now.month:02d}-{day:02d}"
-                day_meds = [m for m in med_data if m[0] == date_str]
-                
-                if day_meds:
-                    cols[idx].markdown(f"**{day}** ✅")
-                    if cols[idx].button(f"Details {day}", key=f"btn_{date_str}"):
-                        st.write(f"Medications taken on {date_str}:")
-                        for med in day_meds:
-                            st.write(f"- {med[1]}: {med[2]} units at {med[3]}")
-                else:
-                    cols[idx].write(day)
-def update_streak(conn, user_id):
-    today = datetime.now().date()
-    yesterday = today - timedelta(days=1)
-    
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT date FROM medications 
-        WHERE user_id = ? AND date = ?
-    """, (user_id, yesterday))
-    
-    if cursor.fetchone():
-        # Update streak
-        cursor.execute("""
-            UPDATE users 
-            SET streak = streak + 1 
-            WHERE user_id = ?
-        """, (user_id,))
-    else:
-        # Reset streak
-        cursor.execute("""
-            UPDATE users 
-            SET streak = 0 
-            WHERE user_id = ?
-        """, (user_id,))
-    
-    conn.commit()
-def initialize_session_state():
-    if 'medications' not in st.session_state:
-        st.session_state.medications = []
-    if 'streak' not in st.session_state:
-        st.session_state.streak = 0
-
-def create_timer():
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        current_time = datetime.now().strftime("%H:%M")
-        st.header(f"🕐 {current_time}")
-    with col2:
-        if st.button("Mark as taken"):
-            st.success("Medication marked as taken!")
-            update_streak()
-
-def create_medication_input():
-    with st.expander("Log Medication"):
-        med_options = ["Insulin", "Metformin", "Glipizide", "Other"]
-        med_name = st.selectbox("Medication", med_options)
-        if med_name == "Other":
-            med_name = st.text_input("Enter medication name")
-        
-        dosage = st.number_input("Dosage (units)", min_value=0.0)
-        time_taken = st.time_input("Time taken")
-        
-        if st.button("Save"):
-            save_medication(med_name, dosage, time_taken)
-            st.success("Medication logged successfully!")
-
-def create_glucose_chart():
-    # Sample data - replace with actual database data
-    dates = pd.date_range(start='2023-01-01', periods=7)
-    levels = [180, 165, 170, 155, 160, 150, 140]
-    df = pd.DataFrame({'Date': dates, 'Glucose': levels})
-    
-    fig = px.line(df, x='Date', y='Glucose', title='Glucose Forecast')
-    fig.update_layout(
-        xaxis_title="Time",
-        yaxis_title="Sugar Level",
-        height=300
-    )
-    st.plotly_chart(fig, use_container_width=True)
-def save_medication(med_name, dosage, time_taken):
     conn = create_database_connection()
     if conn:
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                INSERT INTO medications (user_id, med_name, dosage, time_taken, date)
-                VALUES (?, ?, ?, ?, ?)
-            """, (st.session_state.get('user_id', 'default_user'),
-                  med_name, dosage, time_taken, datetime.now().date()))
-            conn.commit()
-        finally:
-            conn.close()
-
-def update_streak():
-    st.session_state.streak += 1
-
-def main():
-    st.set_page_config(page_title="Diabetes Support App", layout="wide")
-    initialize_session_state()
-
-    # Main layout
-    col1, col2 = st.columns([3, 2])
-    
-    with col1:
-        create_timer()
-        st.markdown("---")
-        create_medication_input()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT date, med_name, dosage, time_taken 
+            FROM medications 
+            WHERE user_id = ? AND strftime('%Y-%m', date) = ?
+        """, (st.session_state.user_id, now.strftime('%Y-%m')))
+        med_data = cursor.fetchall()
         
-        # Weekly calendar
-        st.subheader("Weekly Medication Tracker")
+        # Display calendar
         days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
         cols = st.columns(7)
+        
         for idx, day in enumerate(days):
-            with cols[idx]:
-                st.write(day)
-                if idx in [0, 2, 3, 4, 5]:  # Sample taken days
-                    st.markdown("✅")
-                else:
-                    st.markdown("❌")
+            cols[idx].write(day)
+        
+        for week in cal:
+            cols = st.columns(7)
+            for idx, day in enumerate(week):
+                if day != 0:
+                    date_str = f"{now.year}-{now.month:02d}-{day:02d}"
+                    day_meds = [m for m in med_data if m[0] == date_str]
+                    
+                    if day_meds:
+                        cols[idx].markdown(f"**{day}** ✅")
+                    else:
+                        cols[idx].write(day)
+        
+        conn.close()
 
-    with col2:
-        st.header("Awareness and Education")
-        create_glucose_chart()
+def initialize_session_state():
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = 'default_user'
+    if 'page' not in st.session_state:
+        st.session_state.page = 'Home'
+
+def main():
+    st.set_page_config(
+        page_title="Diabetes Support App",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    initialize_session_state()
+    
+    # Sidebar Navigation
+    with st.sidebar:
+        st.title("Navigation")
+        pages = {
+            "Home": "🏠",
+            "Medication Tracker": "💊",
+            "Glucose Tracker": "📊",
+            "Community": "👥",
+            "Resources": "📚",
+            "Settings": "⚙️"
+        }
         
-        with st.expander("FAQ's"):
-            st.write("Common questions and answers about diabetes management")
+        for page, icon in pages.items():
+            if st.button(f"{icon} {page}", key=f"nav_{page}"):  # Added unique key
+                st.session_state.page = page
+
+    # Main Content
+    if st.session_state.page == "Home":
+        col1, col2 = st.columns([2, 1])
         
-        with st.expander("Education"):
-            st.write("Links to educational resources and medication information")
+        with col1:
+            # Timer and Medication Status
+            current_time = datetime.now().strftime("%H:%M")
+            st.header(f"🕐 {current_time}")
+            
+            if st.button("Mark as taken"):
+                st.success("Medication marked as taken!")
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        with conn:
+                            conn.execute("""
+                                INSERT INTO medications 
+                                (user_id, med_name, time_taken, date)
+                                VALUES (?, 'Daily Medication', ?, ?)
+                            """, (st.session_state.user_id, datetime.now(), 
+                                  datetime.now().date()))
+                    finally:
+                        conn.close()
+            
+            # Streak Display
+            conn = create_database_connection()
+            if conn:
+                streak = calculate_streak(conn, st.session_state.user_id)
+                st.metric("Current Streak", f"{streak} days", "Keep it up! 🎯")
+                conn.close()
+            
+            # Calendar View
+            display_medication_calendar()
+            
+            # Medication Input - Now directly showing the form instead of using an expander
+            st.subheader("Log Medication")
+            med_options = ["Insulin", "Metformin", "Glipizide", "Januvia", "Other"]
+            med_name = st.selectbox("Medication Name", med_options, key="home_med_name")
+            if med_name == "Other":
+                med_name = st.text_input("Enter medication name", key="home_med_other")
+            dosage = st.number_input("Dosage", min_value=0.0, key="home_dosage")
+            time_taken = st.time_input("Time Taken", key="home_time")
+            
+            if st.button("Log Medication", key="log_med_button"):
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        time_taken_str = time_taken.strftime('%H:%M:%S')
+                        with conn:
+                            conn.execute("""
+                                INSERT INTO medications 
+                                (user_id, med_name, dosage, time_taken, date)
+                                VALUES (?, ?, ?, ?, ?)
+                            """, (st.session_state.user_id, med_name, dosage, 
+                                  time_taken_str, datetime.now().date()))
+                        st.success("Medication logged successfully!")
+                    except Exception as e:
+                        st.error(f"Error logging medication: {e}")
+                    finally:
+                        conn.close()
+        col1, col2 = st.columns([2, 1])
         
-        with st.expander("Awareness"):
-            st.write("Important information about medication adherence")
+        with col1:
+            # Timer and Medication Status
+            current_time = datetime.now().strftime("%H:%M")
+            st.header(f"🕐 {current_time}")
+            
+            if st.button("Mark as taken", key="mark_taken_button"):
+                st.success("Medication marked as taken!")
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        with conn:
+                            conn.execute("""
+                                INSERT INTO medications 
+                                (user_id, med_name, time_taken, date)
+                                VALUES (?, 'Daily Medication', ?, ?)
+                            """, (st.session_state.user_id, datetime.now(), 
+                                  datetime.now().date()))
+                    finally:
+                        conn.close()
+            
+            # Streak Display
+            conn = create_database_connection()
+            if conn:
+                streak = calculate_streak(conn, st.session_state.user_id)
+                st.metric("Current Streak", f"{streak} days", "Keep it up! 🎯")
+                conn.close()
+            
+            # Calendar View
+            display_medication_calendar()
+            
+            # Medication Input
+            with st.expander("Log Medication"):
+                medication_tracker()
+        
+        with col2:
+            st.header("Awareness and Education")
+            
+            # Glucose Chart
+            display_glucose_chart()
+            
+            # Educational Sections
+            with st.expander("📋 FAQ's"):
+                st.write("""
+                ### Frequently Asked Questions
+                
+                **Q: How often should I check my glucose?**
+                - Before meals and at bedtime
+                - When you feel symptoms of low or high blood sugar
+                - Before and after exercise
+                
+                **Q: What are normal blood sugar levels?**
+                - Before meals: 80-130 mg/dL
+                - 2 hours after meals: Less than 180 mg/dL
+                
+                **Q: When should I take my medication?**
+                - Follow your healthcare provider's specific instructions
+                - Try to take medications at the same time each day
+                - Some medications need to be taken with food
+                
+                **Q: What should I do if I miss a dose?**
+                - Contact your healthcare provider for guidance
+                - Never double up on doses without medical advice
+                - Record any missed doses in the app
+                """)
+            
+            with st.expander("📚 Education"):
+                st.write("""
+                ### Educational Resources
+                
+                **Medication Information:**
+                - [Understanding Your Diabetes Medications](link)
+                - [Proper Injection Techniques](link)
+                - [Storage Guidelines](link)
+                
+                **Video Tutorials:**
+                - How to Check Blood Sugar
+                - Proper Insulin Injection
+                - Using Your Glucose Meter
+                
+                **Downloads:**
+                - Medication Schedule Template
+                - Blood Sugar Log Sheet
+                - Carb Counting Guide
+                """)
+            
+            with st.expander("⚠️ Awareness"):
+                st.warning("""
+                ### Important Reminders
+                
+                **Medication Safety:**
+                - Take medications exactly as prescribed
+                - Store medications properly
+                - Check expiration dates
+                
+                **Warning Signs:**
+                - Watch for signs of low blood sugar
+                - Monitor for injection site reactions
+                - Track any side effects
+                
+                **When to Seek Help:**
+                - Blood sugar outside target range
+                - Severe side effects
+                - Unusual symptoms
+                """)
+    
+    elif st.session_state.page == "Medication Tracker":
+        medication_tracker()
+    
+    elif st.session_state.page == "Glucose Tracker":
+        glucose_tracker()
+    
+    elif st.session_state.page == "Community":
+        st.title("Community Support")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Support Groups")
+            st.write("""
+            ### Local Support Groups
+            - Diabetes Support Group Meetings
+            - Online Community Forums
+            - Peer Mentoring Programs
+            
+            ### Healthcare Provider Network
+            - Find Certified Diabetes Educators
+            - Connect with Endocrinologists
+            - Pharmacy Support Services
+            """)
+        
+        with col2:
+            st.subheader("Resources")
+            st.write("""
+            ### Community Events
+            - Educational Workshops
+            - Fitness Classes
+            - Cooking Demonstrations
+            
+            ### Support Services
+            - Transportation Assistance
+            - Medical Supply Resources
+            - Financial Aid Programs
+            """)
+    
+    elif st.session_state.page == "Resources":
+        st.title("Resources")
+        
+        tabs = st.tabs(["Educational Materials", "Videos", "Downloads"])
+        
+        with tabs[0]:
+            st.header("Educational Materials")
+            st.write("""
+            ### Diabetes Management
+            - Understanding Type 1 and Type 2 Diabetes
+            - Nutrition Guidelines
+            - Exercise Recommendations
+            
+            ### Medication Information
+            - Types of Insulin
+            - Oral Medications
+            - Proper Storage and Handling
+            """)
+        
+        with tabs[1]:
+            st.header("Video Resources")
+            st.write("""
+            ### Tutorial Videos
+            - Blood Sugar Testing
+            - Insulin Injection Techniques
+            - Using Your Glucose Meter
+            
+            ### Educational Series
+            - Living Well with Diabetes
+            - Nutrition Basics
+            - Exercise Safety
+            """)
+        
+        with tabs[2]:
+            st.header("Downloads")
+            st.write("""
+            ### Printable Resources
+            - Blood Sugar Log
+            - Medication Schedule
+            - Meal Planning Guide
+            
+            ### Tools and Charts
+            - Carb Counting Guide
+            - A1C Tracker
+            - Exercise Log
+            """)
+    
+    elif st.session_state.page == "Settings":
+        st.title("Settings")
+        
+        st.subheader("Notification Settings")
+        notification_time = st.time_input("Set Default Reminder Time")
+        st.checkbox("Enable Daily Reminders")
+        st.checkbox("Enable Low Blood Sugar Alerts")
+        
+        st.subheader("Profile Settings")
+        st.text_input("Name")
+        st.text_input("Email")
+        st.selectbox("Preferred Language", ["English", "Spanish", "French"])
+        
+        st.subheader("Medical Information")
+        st.text_input("Healthcare Provider")
+        st.text_input("Emergency Contact")
+        
+        if st.button("Save Settings", key="save_settings_button"):
+            st.success("Settings saved successfully!")
 
 if __name__ == "__main__":
     main()
