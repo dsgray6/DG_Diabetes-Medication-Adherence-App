@@ -79,12 +79,80 @@ def create_tables(conn):
                   plan_content TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS anonymous_data
+                 (user_id TEXT PRIMARY KEY,
+                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+
+def log_medication(user_id, med_name, dosage, time_taken, date):
+    conn = create_database_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT INTO medications 
+                    (user_id, med_name, dosage, time_taken, date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (user_id, med_name, dosage, time_taken, date))
+            return True
+        except Exception as e:
+            st.error(f"Error logging medication: {e}")
+            return False
+        finally:
+            conn.close()
+    return False
+
+def log_glucose(user_id, glucose_level):
+    conn = create_database_connection()
+    if conn:
+        try:
+            with conn:
+                conn.execute("""
+                    INSERT INTO glucose_readings 
+                    (user_id, glucose_level, reading_time)
+                    VALUES (?, ?, ?)
+                """, (user_id, glucose_level, datetime.now()))
+            return True
+        except Exception as e:
+            st.error(f"Error logging glucose level: {e}")
+            return False
+        finally:
+            conn.close()
+    return False
+
+def sign_out():
+    if st.session_state.get('is_anonymous', False):
+        conn = create_database_connection()
+        if conn:
+            try:
+                cursor = conn.cursor()
+                cursor.execute("DELETE FROM medications WHERE user_id = ?", 
+                             (st.session_state.anonymous_id,))
+                cursor.execute("DELETE FROM glucose_readings WHERE user_id = ?", 
+                             (st.session_state.anonymous_id,))
+                conn.commit()
+            except Exception as e:
+                st.error(f"Error cleaning up anonymous data: {e}")
+            finally:
+                conn.close()
+
+    # Reset all session state variables
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # Reinitialize session state
+    initialize_session_state()
+    st.rerun()
+
+    # Reset all session state variables
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    
+    # Reinitialize session state
+    initialize_session_state()
+    st.rerun()
 
 def user_auth():
-    # Make sure session state is initialized
-    initialize_session_state()
-    
-    if not st.session_state['authenticated']:
+    if not st.session_state.authenticated:
         tab1, tab2, tab3 = st.tabs(["Sign In", "Sign Up", "Anonymous"])
         
         with tab1:
@@ -92,18 +160,21 @@ def user_auth():
             if st.button("Sign In"):
                 conn = create_database_connection()
                 if conn:
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT user_id FROM user_accounts WHERE username = ?", 
-                                 (username,))
-                    result = cursor.fetchone()
-                    if result:
-                        st.session_state['authenticated'] = True
-                        st.session_state['user_id'] = result[0]
-                        st.session_state['username'] = username
-                        st.rerun()
-                    else:
-                        st.error("Invalid username")
-                    conn.close()
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("SELECT user_id FROM user_accounts WHERE username = ?", 
+                                     (username,))
+                        result = cursor.fetchone()
+                        if result:
+                            st.session_state.authenticated = True
+                            st.session_state.user_id = result[0]
+                            st.session_state.username = username  # Set the username
+                            st.session_state.is_anonymous = False
+                            st.rerun()
+                        else:
+                            st.error("Invalid username")
+                    finally:
+                        conn.close()
         
         with tab2:
             full_name = st.text_input("Full Name")
@@ -118,6 +189,7 @@ def user_auth():
                             VALUES (?, ?)
                         """, (full_name, new_username))
                         conn.commit()
+                        st.session_state.username = new_username  # Set the username
                         st.success("Account created successfully!")
                     except sqlite3.IntegrityError:
                         st.error("Username already exists")
@@ -127,9 +199,13 @@ def user_auth():
         with tab3:
             st.write("Browse as anonymous user")
             if st.button("Continue as Anonymous"):
-                st.session_state['authenticated'] = True
-                st.session_state['user_id'] = "anonymous"
-                st.session_state['username'] = "Anonymous User"
+                timestamp = datetime.now().strftime("%m%d_%H")
+                anonymous_id = f"anon_{timestamp}"
+                st.session_state.authenticated = True
+                st.session_state.user_id = anonymous_id
+                st.session_state.username = f"Anonymous_{timestamp}"  # Set anonymous username
+                st.session_state.is_anonymous = True
+                st.session_state.anonymous_id = anonymous_id
                 st.rerun()
         
         return False
@@ -439,17 +515,22 @@ def community_chat():
         conn.close()
 
 def initialize_session_state():
-    # Initialize all required session state variables
+    if 'page' not in st.session_state:
+        st.session_state.page = 'Home'
+    if 'is_provider' not in st.session_state:
+        st.session_state.is_provider = False
+    if 'provider_id' not in st.session_state:
+        st.session_state.provider_id = None
     if 'authenticated' not in st.session_state:
         st.session_state.authenticated = False
     if 'user_id' not in st.session_state:
-        st.session_state.user_id = 'default_user'
-    if 'is_provider' not in st.session_state:
-        st.session_state.is_provider = False
-    if 'page' not in st.session_state:
-        st.session_state.page = "Home"
-    if 'provider_id' not in st.session_state:
-        st.session_state.provider_id = None
+        st.session_state.user_id = None
+    if 'is_anonymous' not in st.session_state:
+        st.session_state.is_anonymous = False
+    if 'anonymous_id' not in st.session_state:
+        st.session_state.anonymous_id = None
+    if 'username' not in st.session_state:
+        st.session_state.username = None
 
 def healthcare_provider_section():
     st.title("Healthcare Provider Portal")
@@ -790,6 +871,22 @@ def main():
 
     if not user_auth():
         return
+
+    # Add sign out button in sidebar if user is authenticated
+    if st.session_state.authenticated:
+        with st.sidebar:
+            if st.button("Sign Out"):
+                sign_out()
+    
+    # Show user status
+    with st.sidebar:
+        if st.session_state.authenticated:
+            if st.session_state.is_anonymous:
+                st.info("Browsing as Anonymous User")
+            elif st.session_state.is_provider:
+                st.info(f"Signed in as Provider: {st.session_state.provider_id}")
+            else:
+                st.info(f"Signed in as: {st.session_state.username}")
     
     if st.session_state.username:
         st.sidebar.write(f"Welcome, {st.session_state.username}!")
