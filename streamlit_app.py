@@ -5,6 +5,38 @@ import plotly.express as px
 import sqlite3
 from pathlib import Path
 import calendar
+import io
+
+def admin_functions():
+    st.title("Admin Functions")
+    
+    if st.session_state.get('is_admin', False):  # Add admin check
+        with st.expander("Data Management"):
+            # Clear Daily Medication entries
+            if st.button("Clear Daily Medication Entries"):
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        conn.execute("DELETE FROM medications WHERE med_name = 'Daily Medication'")
+                        conn.commit()
+                        st.success("Daily Medication entries cleared!")
+                    finally:
+                        conn.close()
+            
+            # Clear old data
+            days_to_keep = st.number_input("Keep data for how many days?", min_value=1, value=30)
+            if st.button("Clear Old Data"):
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        conn.execute("""
+                            DELETE FROM medications 
+                            WHERE date < date('now', ?)
+                        """, (f'-{days_to_keep} days',))
+                        conn.commit()
+                        st.success("Old data cleared!")
+                    finally:
+                        conn.close()
 
 # Database Functions
 def create_database_connection():
@@ -20,79 +52,78 @@ def create_database_connection():
         return None
 
 def create_tables(conn):
-    conn.execute('''CREATE TABLE IF NOT EXISTS users
-                 (user_id TEXT PRIMARY KEY,
-                  streak INTEGER DEFAULT 0)''')
-                  
-    conn.execute('''CREATE TABLE IF NOT EXISTS medications
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id TEXT,
-                  med_name TEXT,
-                  dosage REAL,
-                  time_taken TIMESTAMP,
-                  scheduled_time TIME,
-                  date DATE)''')
-
-    conn.execute('''CREATE TABLE IF NOT EXISTS glucose_readings
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id TEXT,
-                  glucose_level REAL,
-                  reading_time TIMESTAMP)''')
+    try:
+        conn.execute('''CREATE TABLE IF NOT EXISTS glucose_readings
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      glucose_level REAL,
+                      reading_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    conn.execute('''CREATE TABLE IF NOT EXISTS medication_schedule
-                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id TEXT,
-                  med_name TEXT,
-                  scheduled_time TIME,
-                  dosage REAL)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS user_accounts
-                 (user_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  full_name TEXT,
-                  username TEXT UNIQUE,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS medications
+                     (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      med_name TEXT,
+                      dosage REAL,
+                      time_taken TIMESTAMP,
+                      date DATE)''')
     
-    conn.execute('''CREATE TABLE IF NOT EXISTS community_posts
-                 (post_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  user_id INTEGER,
-                  content TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS user_accounts
+                     (user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      full_name TEXT,
+                      username TEXT UNIQUE,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
     
-    conn.execute('''CREATE TABLE IF NOT EXISTS post_comments
-                 (comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  post_id INTEGER,
-                  user_id INTEGER,
-                  content TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-
-    conn.execute('''CREATE TABLE IF NOT EXISTS provider_messages
-                 (message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  patient_id INTEGER,
-                  provider_id INTEGER,
-                  message_content TEXT,
-                  sender_type TEXT,
-                  sent_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS provider_messages
+                     (message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      patient_id INTEGER,
+                      provider_id INTEGER,
+                      message_content TEXT,
+                      sender_type TEXT,
+                      sent_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (patient_id) REFERENCES user_accounts(user_id),
+                      FOREIGN KEY (provider_id) REFERENCES user_accounts(user_id))''')
     
-    conn.execute('''CREATE TABLE IF NOT EXISTS treatment_plans
-                 (plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                  patient_id INTEGER,
-                  provider_id INTEGER,
-                  plan_content TEXT,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    conn.execute('''CREATE TABLE IF NOT EXISTS anonymous_data
-                 (user_id TEXT PRIMARY KEY,
-                  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+        conn.execute('''CREATE TABLE IF NOT EXISTS treatment_plans
+                     (plan_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      patient_id INTEGER,
+                      provider_id INTEGER,
+                      plan_content TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
+    
+        conn.execute('''CREATE TABLE IF NOT EXISTS community_posts
+                     (post_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      user_id INTEGER,
+                      content TEXT,
+                      post_type TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (user_id) REFERENCES user_accounts(user_id))''')
+    
+        conn.execute('''CREATE TABLE IF NOT EXISTS post_comments
+                     (comment_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                      post_id INTEGER,
+                      user_id INTEGER,
+                      content TEXT,
+                      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                      FOREIGN KEY (post_id) REFERENCES community_posts(post_id),
+                      FOREIGN KEY (user_id) REFERENCES user_accounts(user_id))''')
+        conn.commit()
+    except Exception as e:
+        st.error(f"Error creating/updating tables: {e}")
 
 def log_medication(user_id, med_name, dosage, time_taken, date):
     conn = create_database_connection()
     if conn:
         try:
             with conn:
+                # Convert time_taken to string format
+                time_str = time_taken.strftime('%H:%M:%S')
                 conn.execute("""
                     INSERT INTO medications 
                     (user_id, med_name, dosage, time_taken, date)
                     VALUES (?, ?, ?, ?, ?)
-                """, (user_id, med_name, dosage, time_taken, date))
+                """, (user_id, med_name, dosage, time_str, date))
+                conn.commit()
             return True
         except Exception as e:
             st.error(f"Error logging medication: {e}")
@@ -106,12 +137,14 @@ def log_glucose(user_id, glucose_level):
     if conn:
         try:
             with conn:
-                conn.execute("""
+                cursor = conn.cursor()
+                cursor.execute('''
                     INSERT INTO glucose_readings 
                     (user_id, glucose_level, reading_time)
-                    VALUES (?, ?, ?)
-                """, (user_id, glucose_level, datetime.now()))
-            return True
+                    VALUES (?, ?, datetime('now'))
+                ''', (user_id, glucose_level))
+                conn.commit()
+                return True
         except Exception as e:
             st.error(f"Error logging glucose level: {e}")
             return False
@@ -166,9 +199,12 @@ def user_auth():
                                      (username,))
                         result = cursor.fetchone()
                         if result:
+                            cursor.execute("SELECT full_name FROM user_accounts WHERE user_id = ?", (result[0],))
+                            full_name = cursor.fetchone()[0]
                             st.session_state.authenticated = True
                             st.session_state.user_id = result[0]
-                            st.session_state.username = username  # Set the username
+                            st.session_state.username = username
+                            st.session_state.full_name = full_name  # Store full name in session
                             st.session_state.is_anonymous = False
                             st.rerun()
                         else:
@@ -246,63 +282,18 @@ def calculate_streak(conn, user_id):
 def medication_tracker():
     st.header("Medication Tracker")
     
-    current_time = datetime.now().strftime("%H:%M")
-    st.subheader(f"Current Time: {current_time}")
-    
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        selected_date = st.date_input("Select Date", datetime.now())
-    
-    med_options = ["Insulin", "Metformin", "Glipizide", "Januvia", "Other"]
-    
-    # Remove the expander here and just show the form directly
-    st.subheader("Log New Medication")
-    med_name = st.selectbox("Medication Name", med_options)
+    med_name = st.selectbox("Medication", ["Insulin", "Metformin", "Other"], key="med_name_select")
     if med_name == "Other":
         med_name = st.text_input("Enter medication name")
-    dosage = st.number_input("Dosage", min_value=0.0)
+    
+    dosage = st.number_input("Dosage (mL)", min_value=0.0)
+    
     time_taken = st.time_input("Time Taken")
     
     if st.button("Log Medication"):
-        conn = create_database_connection()
-        if conn:
-            try:
-                time_taken_str = time_taken.strftime('%H:%M:%S')
-                with conn:
-                    conn.execute("""
-                        INSERT INTO medications 
-                        (user_id, med_name, dosage, time_taken, date)
-                        VALUES (?, ?, ?, ?, ?)
-                    """, (st.session_state.user_id, med_name, dosage, 
-                          time_taken_str, selected_date))
-                st.success("Medication logged successfully!")
-            except Exception as e:
-                st.error(f"Error logging medication: {e}")
-            finally:
-                conn.close()
-
-def display_glucose_chart():
-    conn = create_database_connection()
-    if conn:
-        df = pd.read_sql_query("""
-            SELECT glucose_level, reading_time 
-            FROM glucose_readings 
-            WHERE user_id = ? 
-            ORDER BY reading_time
-        """, conn, params=(st.session_state.user_id,))
-        
-        if not df.empty:
-            fig = px.line(df, x='reading_time', y='glucose_level',
-                         title='Glucose Levels Over Time')
-            fig.update_layout(
-                xaxis_title="Time",
-                yaxis_title="Glucose Level",
-                height=300
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("No glucose readings available yet.")
-        conn.close()
+        success = log_medication(st.session_state.user_id, med_name, dosage, time_taken, datetime.now().date())
+        if success:
+            st.success("Medication logged successfully!")
 
 def glucose_tracker():
     st.subheader("Glucose Tracker")
@@ -379,34 +370,62 @@ def display_medication_calendar():
     
     conn = create_database_connection()
     if conn:
-        cursor = conn.cursor()
-        cursor.execute("""
-            SELECT date, med_name, dosage, time_taken 
-            FROM medications 
-            WHERE user_id = ? AND strftime('%Y-%m', date) = ?
-        """, (st.session_state.user_id, now.strftime('%Y-%m')))
-        med_data = cursor.fetchall()
-        
-        # Display calendar
-        days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        cols = st.columns(7)
-        
-        for idx, day in enumerate(days):
-            cols[idx].write(day)
-        
-        for week in cal:
+        try:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT date, med_name, dosage, time_taken 
+                FROM medications 
+                WHERE user_id = ? 
+                AND strftime('%Y-%m', date) = ?
+            """, (st.session_state.user_id, now.strftime('%Y-%m')))
+            
+            med_data = cursor.fetchall()
+            
+            # Display calendar
+            days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
             cols = st.columns(7)
-            for idx, day in enumerate(week):
-                if day != 0:
-                    date_str = f"{now.year}-{now.month:02d}-{day:02d}"
-                    day_meds = [m for m in med_data if m[0] == date_str]
-                    
-                    if day_meds:
-                        cols[idx].markdown(f"**{day}** ✅")
-                    else:
-                        cols[idx].write(day)
-        
-        conn.close()
+            
+            for idx, day in enumerate(days):
+                cols[idx].write(day)
+            
+            for week in cal:
+                cols = st.columns(7)
+                for idx, day in enumerate(week):
+                    if day != 0:
+                        date_str = f"{now.year}-{now.month:02d}-{day:02d}"
+                        day_meds = [m for m in med_data if m[0] == date_str]
+                        
+                        if day_meds:
+                            cols[idx].markdown(f"**{day}** ✅")
+                        else:
+                            cols[idx].write(day)             
+        except Exception as e:
+            st.error(f"Error displaying medication calendar: {e}")
+        finally:
+            conn.close()
+
+def display_recent_medications():
+    conn = create_database_connection()
+    if conn:
+        try:
+            med_data = pd.read_sql_query("""
+                SELECT med_name, dosage, time_taken, date 
+                FROM medications 
+                WHERE user_id = ? 
+                AND med_name != 'Daily Medication'
+                ORDER BY date DESC, time_taken DESC
+                LIMIT 10
+            """, conn, params=(st.session_state.user_id,))
+            
+            if not med_data.empty:
+                st.dataframe(med_data)
+            else:
+                st.info("No recent medication records")
+                
+        except Exception as e:
+            st.error(f"Error displaying medications: {e}")
+        finally:
+            conn.close()
 
 def medication_info_pages():
     st.title("Medication Information")
@@ -419,21 +438,40 @@ def medication_info_pages():
     
     with tab1:
         st.header("Understanding Your Diabetes Medication")
-        st.write("""
-        ### Types of Insulin
-        - Rapid-acting insulin
-        - Short-acting insulin
-        - Intermediate-acting insulin
-        - Long-acting insulin
         
-        ### Oral Medications
-        - Metformin
-        - Sulfonylureas
-        - DPP-4 inhibitors
-        """)
+        # Add clickable sections with detailed information
+        with st.expander("Types of Insulin"):
+            st.write("""
+            ### Rapid-acting insulin
+            - Starts working: 15 minutes
+            - Peak effect: 1 hour
+            - Duration: 2-4 hours
+            [Learn more](https://www.diabetes.org/healthy-living/medication-treatments/insulin-other-injectables/insulin-basics)
+            
+            ### Short-acting insulin
+            - Starts working: 30 minutes
+            - Peak effect: 2-3 hours
+            - Duration: 3-6 hours
+            [Learn more](https://www.diabetes.org/healthy-living/medication-treatments/insulin-other-injectables/insulin-basics)
+            """)
+        
+        with st.expander("Oral Medications"):
+            st.write("""
+            ### Metformin
+            - Primary first-line medication
+            - How it works: Reduces glucose production
+            [Detailed Information](https://medlineplus.gov/druginfo/meds/a696005.html)
+            
+            ### Sulfonylureas
+            - Increases insulin production
+            - Common brands: Glipizide, Glyburide
+            [Learn more](https://medlineplus.gov/druginfo/meds/a684060.html)
+            """)
     
     with tab2:
         st.header("Proper Injection Techniques")
+        
+        # Add interactive content
         st.write("""
         ### Step-by-Step Guide
         1. Clean the injection site
@@ -441,78 +479,393 @@ def medication_info_pages():
         3. Insert the needle at a 90-degree angle
         4. Slowly inject the insulin
         5. Wait 5-10 seconds before removing the needle
+        
+        [Watch Video Tutorial](https://www.diabetes.org/healthy-living/medication-treatments/insulin-other-injectables/insulin-injection-resources)
         """)
+        
+        with st.expander("Injection Site Rotation"):
+            st.image("https://placeholder-image-url.com/injection-sites.jpg")
+            st.write("""
+            Proper rotation of injection sites is crucial to prevent lipohypertrophy.
+            [Download Rotation Guide](https://professional.diabetes.org/sites/professional.diabetes.org/files/media/insulin_injection_reference_guide.pdf)
+            """)
     
     with tab3:
         st.header("Storage Guidelines")
-        st.write("""
-        ### Proper Storage
-        - Keep insulin in the refrigerator (36-46°F)
-        - In-use insulin can be stored at room temperature
-        - Avoid extreme temperatures
-        - Check expiration dates regularly
-        """)
+        
+        # Add practical storage information
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.subheader("Unopened Insulin")
+            st.write("""
+            - Store in refrigerator (36-46°F)
+            - Do not freeze
+            - Keep until expiration date
+            [Storage Guidelines](https://www.fda.gov/drugs/emergency-preparedness/insulin-storage-and-switching-between-products-emergency)
+            """)
+        
+        with col2:
+            st.subheader("In-Use Insulin")
+            st.write("""
+            - Can be stored at room temperature
+            - Use within 28 days
+            - Keep away from direct heat and light
+            [Daily Storage Tips](https://www.diabetes.org/healthy-living/medication-treatments/insulin-other-injectables/insulin-storage-and-safety)
+            """)
+
+def create_analytics_charts(patient_id, timeframe, conn):
+    st.subheader(f"Analytics for {timeframe[1]}")
+    
+    try:
+        # Glucose Analysis
+        glucose_data = pd.read_sql_query("""
+            SELECT glucose_level, reading_time, 
+                   strftime('%H', reading_time) as hour,
+                   strftime('%Y-%m-%d', reading_time) as date
+            FROM glucose_readings
+            WHERE user_id = ? 
+            AND reading_time >= datetime('now', ?)
+            ORDER BY reading_time DESC
+        """, conn, params=(patient_id, timeframe[0]))
+        
+        if not glucose_data.empty:
+            # Daily Average Chart
+            daily_avg = glucose_data.groupby('date')['glucose_level'].agg(['mean', 'min', 'max']).reset_index()
+            
+            fig_daily = px.line(daily_avg, x='date', y='mean',
+                               title='Daily Average Glucose Levels',
+                               labels={'mean': 'Glucose Level (mg/dL)', 'date': 'Date'})
+            fig_daily.add_scatter(x=daily_avg['date'], y=daily_avg['max'], name='Max',
+                                line=dict(dash='dash'))
+            fig_daily.add_scatter(x=daily_avg['date'], y=daily_avg['min'], name='Min',
+                                line=dict(dash='dash'))
+            st.plotly_chart(fig_daily)
+            
+            # Time of Day Analysis
+            hourly_avg = glucose_data.groupby('hour')['glucose_level'].mean().reset_index()
+            fig_hourly = px.bar(hourly_avg, x='hour', y='glucose_level',
+                               title='Average Glucose by Hour of Day',
+                               labels={'glucose_level': 'Glucose Level (mg/dL)', 'hour': 'Hour'})
+            st.plotly_chart(fig_hourly)
+            
+            # Statistics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Average Glucose", f"{glucose_data['glucose_level'].mean():.1f} mg/dL")
+            col2.metric("High Readings (>180)", len(glucose_data[glucose_data['glucose_level'] > 180]))
+            col3.metric("Low Readings (<70)", len(glucose_data[glucose_data['glucose_level'] < 70]))
+        else:
+            st.info("No glucose data available for this timeframe")
+        
+        # Medication Adherence
+        med_data = pd.read_sql_query("""
+            SELECT med_name, date, time_taken
+            FROM medications
+            WHERE user_id = ?
+            AND date >= date('now', ?)
+            ORDER BY date DESC, time_taken DESC
+        """, conn, params=(patient_id, timeframe[0]))
+        
+        if not med_data.empty:
+            # Medication Adherence Chart
+            med_counts = med_data.groupby(['date', 'med_name']).size().reset_index(name='count')
+            fig_meds = px.bar(med_counts, x='date', y='count', color='med_name',
+                             title='Daily Medication Adherence',
+                             labels={'count': 'Times Taken', 'date': 'Date'})
+            st.plotly_chart(fig_meds)
+        else:
+            st.info("No medication data available for this timeframe")
+            
+        return glucose_data, med_data
+        
+    except Exception as e:
+        st.error(f"Error creating analytics charts: {e}")
+        return None, None
+
+def detailed_analytics_tab(patient_id):
+    if not patient_id:
+        st.warning("No patient selected")
+        return
+    st.title("Detailed Analytics")
+    
+    # Timeframe selection
+    timeframe_options = [
+        ("-7 days", "Past Week"),
+        ("-30 days", "Past Month"),
+        ("-90 days", "Past 3 Months"),
+        ("-365 days", "Past Year")
+    ]
+    
+    selected_timeframe = st.selectbox(
+        "Select Analysis Period",
+        options=timeframe_options,
+        format_func=lambda x: x[1]
+    )
+    
+    conn = create_database_connection()
+    if conn:
+        try:
+            glucose_data, med_data = create_analytics_charts(
+                patient_id, 
+                selected_timeframe,
+                conn
+            )
+            
+            # Export Data Option
+            if glucose_data is not None or med_data is not None:
+                if st.button("Export Analytics Report"):
+                    try:
+                        buffer = io.BytesIO()
+                        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                            if glucose_data is not None:
+                                glucose_data.to_excel(writer, sheet_name='Glucose Data', index=False)
+                            if med_data is not None:
+                                med_data.to_excel(writer, sheet_name='Medication Data', index=False)
+                        
+                        buffer.seek(0)
+                        st.download_button(
+                            label="Download Excel Report",
+                            data=buffer,
+                            file_name=f"patient_analytics_{datetime.now().strftime('%Y%m%d')}.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+                    except Exception as e:
+                        st.error(f"Error creating Excel report: {e}")
+                        
+        except Exception as e:
+            st.error(f"Error in detailed analytics: {e}")
+        finally:
+            conn.close()
+    else:
+        st.error("Database connection failed")
+
+def patient_messages():
+    st.subheader("Healthcare Provider Messages")
+    
+    conn = create_database_connection()
+    if conn:
+        try:
+            messages = pd.read_sql_query("""
+                SELECT message_content, sent_time, sender_type
+                FROM provider_messages
+                WHERE patient_id = ?
+                ORDER BY sent_time DESC
+            """, conn, params=(st.session_state.user_id,))
+            
+            if not messages.empty:
+                for _, msg in messages.iterrows():
+                    with st.chat_message(msg['sender_type']):
+                        st.write(msg['message_content'])
+                        st.caption(msg['sent_time'])
+            
+            # Allow patients to send messages to their provider
+            new_message = st.text_area("Message to Healthcare Provider")
+            if st.button("Send Message"):
+                if new_message.strip():
+                    conn.execute("""
+                        INSERT INTO provider_messages 
+                        (patient_id, message_content, sender_type)
+                        VALUES (?, ?, 'patient')
+                    """, (st.session_state.user_id, new_message))
+                    conn.commit()
+                    st.success("Message sent!")
+                    st.rerun()
+        finally:
+            conn.close()
+
+def display_provider_messages_patient():
+    st.subheader("Healthcare Provider Messages")
+    
+    conn = create_database_connection()
+    if conn:
+        try:
+            messages = pd.read_sql_query("""
+                SELECT 
+                    pm.message_content, 
+                    pm.sent_time, 
+                    pm.sender_type,
+                    CASE 
+                        WHEN pm.sender_type = 'provider' THEN 
+                            (SELECT full_name FROM user_accounts WHERE user_id = pm.provider_id)
+                        ELSE 'You'
+                    END as sender_name
+                FROM provider_messages pm
+                WHERE pm.patient_id = ?
+                ORDER BY pm.sent_time ASC
+            """, conn, params=(st.session_state.user_id,))
+            
+            if not messages.empty:
+                st.markdown("""
+                    <style>
+                    .provider-message {
+                        background-color: #007AFF;
+                        color: white;
+                        padding: 10px;
+                        border-radius: 15px;
+                        margin: 5px 0;
+                        max-width: 80%;
+                        margin-left: auto;
+                    }
+                    .patient-message {
+                        background-color: #E8E8E8;
+                        padding: 10px;
+                        border-radius: 15px;
+                        margin: 5px 0;
+                        max-width: 80%;
+                    }
+                    .message-name {
+                        font-size: 0.8em;
+                        margin-bottom: 2px;
+                    }
+                    .message-time {
+                        font-size: 0.7em;
+                        margin-top: 2px;
+                    }
+                    .provider-time {
+                        color: rgba(255, 255, 255, 0.8);
+                    }
+                    .patient-time {
+                        color: #999;
+                    }
+                    </style>
+                """, unsafe_allow_html=True)
+                
+                for _, msg in messages.iterrows():
+                    if msg['sender_type'] == 'provider':
+                        st.markdown(f"""
+                            <div class="provider-message">
+                                <div class="message-name" style="color: rgba(255, 255, 255, 0.8);">
+                                    Dr. {msg['sender_name']}
+                                </div>
+                                {msg['message_content']}
+                                <div class="message-time provider-time">{msg['sent_time']}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown(f"""
+                            <div class="patient-message">
+                                <div class="message-name" style="color: #666;">
+                                    You
+                                </div>
+                                {msg['message_content']}
+                                <div class="message-time patient-time">{msg['sent_time']}</div>
+                            </div>
+                        """, unsafe_allow_html=True)
+                
+                # Message input
+                new_message = st.text_area("Reply to your healthcare provider")
+                if st.button("Send"):
+                    if new_message.strip():
+                        conn.execute("""
+                            INSERT INTO provider_messages 
+                            (patient_id, message_content, sender_type)
+                            VALUES (?, ?, 'patient')
+                        """, (st.session_state.user_id, new_message))
+                        conn.commit()
+                        st.rerun()
+            else:
+                st.info("No messages from your healthcare provider yet.")
+                
+        except Exception as e:
+            st.error(f"Error displaying messages: {e}")
+        finally:
+            conn.close()
 
 def community_chat():
-    st.title("Community Support")
+    st.title("Chat")
     
     # Create new post
     with st.expander("Create New Post"):
-        post_content = st.text_area("Share your thoughts")
-        if st.button("Post"):
-            conn = create_database_connection()
-            if conn:
-                try:
-                    conn.execute("""
-                        INSERT INTO community_posts (user_id, content)
-                        VALUES (?, ?)
-                    """, (st.session_state.user_id, post_content))
-                    conn.commit()
-                    st.success("Post created successfully!")
-                finally:
-                    conn.close()
-    
+        post_content = st.text_area("Share your thoughts or ask a question")
+        post_type = st.selectbox("Post Type", ["General Discussion", "Question", "Support"], key="post_type_select")
+        if st.button("Post", key="create_post"):
+            if post_content.strip():  # Check if content is not empty
+                conn = create_database_connection()
+                if conn:
+                    try:
+                        conn.execute("""
+                            INSERT INTO community_posts (user_id, content, post_type)
+                            VALUES (?, ?, ?)
+                        """, (st.session_state.user_id, post_content, post_type))
+                        conn.commit()
+                        st.success("Post created successfully!")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error creating post: {e}")
+                    finally:
+                        conn.close()
+            else:
+                st.warning("Please enter some content for your post")
+
     # Display posts
     conn = create_database_connection()
     if conn:
-        posts = pd.read_sql_query("""
-            SELECT p.*, u.username 
-            FROM community_posts p
-            JOIN user_accounts u ON p.user_id = u.user_id
-            ORDER BY p.created_at DESC
-        """, conn)
-        
-        for _, post in posts.iterrows():
-            st.write(f"**{post['username']}** - {post['created_at']}")
-            st.write(post['content'])
+        try:
+            # Fetch posts with user information
+            posts = pd.read_sql_query("""
+                SELECT p.post_id, p.content, p.created_at, u.username, u.full_name 
+                FROM community_posts p
+                LEFT JOIN user_accounts u ON p.user_id = u.user_id
+                ORDER BY p.created_at DESC
+            """, conn)
             
-            # Comments section
-            with st.expander("Comments"):
-                comments = pd.read_sql_query("""
-                    SELECT c.*, u.username 
-                    FROM post_comments c
-                    JOIN user_accounts u ON c.user_id = u.user_id
-                    WHERE c.post_id = ?
-                    ORDER BY c.created_at
-                """, conn, params=(post['post_id'],))
-                
-                for _, comment in comments.iterrows():
-                    st.write(f"↳ **{comment['username']}**: {comment['content']}")
-                
-                # Add new comment form
-                new_comment = st.text_input("Add a comment", key=f"comment_{post['post_id']}")
-                if st.button("Comment", key=f"btn_{post['post_id']}"):
-                    try:
-                        conn.execute("""
-                            INSERT INTO post_comments (post_id, user_id, content)
-                            VALUES (?, ?, ?)
-                        """, (post['post_id'], st.session_state.user_id, new_comment))
-                        conn.commit()
-                        st.success("Comment added!")
-                        st.experimental_rerun()
-                    except Exception as e:
-                        st.error(f"Error adding comment: {e}")
-        conn.close()
+            # Display each post
+            for _, post in posts.iterrows():
+                with st.container():
+                    # Post header
+                    col1, col2 = st.columns([4, 1])
+                    with col1:
+                        st.markdown(f"**{post['full_name']}** (@{post['username']})")
+                    with col2:
+                        st.markdown(f"_{post['created_at']}_")
+                    
+                    # Post content
+                    st.markdown(f"**{post['post_type']}**")
+                    st.write(post['content'])
+                    
+                    # Comments section
+                    with st.expander("Comments"):
+                        # Fetch comments for this post
+                        comments = pd.read_sql_query("""
+                            SELECT 
+                                c.content,
+                                c.created_at,
+                                u.username,
+                                u.full_name
+                            FROM post_comments c
+                            LEFT JOIN user_accounts u ON c.user_id = u.user_id
+                            WHERE c.post_id = ?
+                            ORDER BY c.created_at
+                        """, conn, params=(post['post_id'],))
+                        
+                        # Display existing comments
+                        for _, comment in comments.iterrows():
+                            st.markdown(f"↳ **{comment['full_name']}**: {comment['content']}")
+                            st.caption(comment['created_at'])
+                        
+                        # Add new comment
+                        new_comment = st.text_input("Add a comment", key=f"comment_{post['post_id']}")
+                        if st.button("Reply", key=f"btn_{post['post_id']}"):
+                            if new_comment.strip():
+                                try:
+                                    conn.execute("""
+                                        INSERT INTO post_comments (post_id, user_id, content)
+                                        VALUES (?, ?, ?)
+                                    """, (post['post_id'], st.session_state.user_id, new_comment))
+                                    conn.commit()
+                                    st.success("Reply added!")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Error adding reply: {e}")
+                            else:
+                                st.warning("Please enter a comment before replying")
+                    
+                    st.markdown("---")  # Separator between posts
+                    
+        except Exception as e:
+            st.error(f"Error loading posts: {e}")
+        finally:
+            conn.close()
 
 def initialize_session_state():
     if 'page' not in st.session_state:
@@ -532,13 +885,65 @@ def initialize_session_state():
     if 'username' not in st.session_state:
         st.session_state.username = None
 
+def add_treatment_plan(patient_id, provider_id):
+    st.subheader("Create Treatment Plan")
+    plan_content = st.text_area("Plan Details")
+    medications = st.text_area("Prescribed Medications")
+    follow_up = st.date_input("Follow-up Date")
+
+    if st.button("Save Treatment Plan"):
+        conn = create_database_connection()
+        if conn:
+            try:
+                conn.execute("""
+                    INSERT INTO treatment_plans 
+                    (patient_id, provider_id, plan_content, medications, follow_up_date)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (patient_id, provider_id, plan_content, medications, follow_up))
+                conn.commit()
+                st.success("Treatment plan saved!")
+            except Exception as e:
+                st.error(f"Error saving plan: {e}")
+            finally:
+                conn.close()
+
+def view_patient_data(patient_id, conn):
+    st.subheader("Patient Data Overview")
+    # Glucose readings
+    glucose_data = pd.read_sql_query("""
+        SELECT glucose_level, reading_time 
+        FROM glucose_readings 
+        WHERE user_id = ? 
+        ORDER BY reading_time DESC
+    """, conn, params=(patient_id,))
+
+    # Medication history
+    med_data = pd.read_sql_query("""
+        SELECT med_name, dosage, time_taken, date 
+        FROM medications 
+        WHERE user_id = ? 
+        ORDER BY date DESC, time_taken DESC
+    """, conn, params=(patient_id,))
+
+    # Display data
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("Glucose Readings")
+        st.dataframe(glucose_data)
+    with col2:
+        st.write("Medication History")
+        st.dataframe(med_data)
+
 def healthcare_provider_section():
     st.title("Healthcare Provider Portal")
-
-    conn = None    
+    
+    conn = create_database_connection()
+    if conn is None:
+        st.error("Failed to connect to database")
+        return
 
     try:
-        # Only show login if not authenticated as provider
+        # Provider authentication
         if not st.session_state.get('is_provider', False):
             col1, col2 = st.columns(2)
             
@@ -546,236 +951,266 @@ def healthcare_provider_section():
                 provider_id = st.text_input("Provider ID")
                 provider_code = st.text_input("Access Code", type="password")
             
-            with col2:
-                st.markdown("""
-                #### Provider Access
-                - Secure access to patient records
-                - Comprehensive patient monitoring 
-                - Direct patient communication
-                """)
-            
             if st.button("Access Provider Portal"):
                 if provider_code == "provider123":
                     st.session_state.is_provider = True
                     st.session_state.provider_id = provider_id
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT full_name FROM user_accounts WHERE user_id = ?", (provider_id,))
+                    provider_name = cursor.fetchone()
+                    if provider_name:
+                        st.session_state.provider_name = provider_name[0]
                     st.rerun()
                 else:
                     st.error("Invalid credentials")
-                return
-        
+            return
+
         # Only proceed if provider is authenticated
         if st.session_state.get('is_provider', False):
-            # Create database connection first
-            conn = create_database_connection()
-            if conn is None:
-                st.error("Failed to connect to database")
-                return
-            
-            # Create tabs
-            tabs = st.tabs([
-                "Patient Overview",
-                "Detailed Analytics",
-                "Communication",
-                "Treatment Plans"
-            ])
-            
             # Get list of patients
-            try:
-                patients_query = """
-                    SELECT DISTINCT u.user_id, u.full_name, u.username,
-                    (SELECT COUNT(*) FROM glucose_readings g WHERE g.user_id = u.user_id) as reading_count,
-                    (SELECT COUNT(*) FROM medications m WHERE m.user_id = u.user_id) as med_count
-                    FROM user_accounts u
-                    ORDER BY u.full_name
-                """
-                patients = pd.read_sql_query(patients_query, conn)
+            patients_query = """
+                SELECT DISTINCT u.user_id, u.full_name, u.username,
+                COALESCE((SELECT COUNT(*) FROM glucose_readings g WHERE g.user_id = u.user_id), 0) as reading_count,
+                COALESCE((SELECT COUNT(*) FROM medications m WHERE m.user_id = u.user_id), 0) as med_count
+                FROM user_accounts u
+                LEFT JOIN glucose_readings g ON u.user_id = g.user_id
+                LEFT JOIN medications m ON u.user_id = m.user_id
+                GROUP BY u.user_id, u.full_name, u.username
+                ORDER BY u.full_name
+            """
+            patients = pd.read_sql_query(patients_query, conn)
 
-                if patients.empty:
-                    st.warning("No patients found in the database")
-                    return
+            # Create tabs
+            tabs = st.tabs(["Patient Overview", "Detailed Analytics", "Communication", "Treatment Plans"])
 
-                # Patient selection sidebar
-                with st.sidebar:
-                    st.subheader("Patient Selection")
-                    selected_patient = st.selectbox(
+            # Patient selection in sidebar
+            with st.sidebar:
+                if len(patients) > 0:  # Check length instead of using .empty
+                    selected_username = st.selectbox(
                         "Select Patient",
                         options=patients['username'].tolist(),
-                        format_func=lambda x: f"{patients[patients['username'] == x]['full_name'].iloc[0]} ({x})"
+                        format_func=lambda x: f"{patients[patients['username'] == x]['full_name'].iloc[0]} ({x})",
+                        key="provider_patient_select"
                     )
                     
-                    if selected_patient:
-                        patient_data = patients[patients['username'] == selected_patient].iloc[0]
-                        st.info(f"""
-                        **Patient Statistics:**
-                        - Glucose Readings: {patient_data['reading_count']}
-                        - Medication Logs: {patient_data['med_count']}
-                        """)
-
-                if selected_patient:
-                    patient_id = patients[patients['username'] == selected_patient]['user_id'].iloc[0]
+                    # Get patient ID from selection
+                    patient_mask = patients['username'] == selected_username
+                    if any(patient_mask):  # Use any() instead of direct DataFrame evaluation
+                        patient_id = int(patients.loc[patient_mask, 'user_id'].iloc[0])
+                        st.session_state.current_patient_id = patient_id
+                else:
+                    st.warning("No patients found in the database")
+                    return
+            # Proceed with tabs if we have a current patient
+            if st.session_state.get('current_patient_id'):
+                # Tab 1: Patient Overview
+                with tabs[0]:
+                    col1, col2 = st.columns([2, 1])
                     
-                    # Tab 1: Patient Overview
-                    with tabs[0]:
-                        col1, col2 = st.columns([2, 1])
+                    with col1:
+                        st.subheader("Glucose Trends")
+                        glucose_query = """
+                            SELECT glucose_level, reading_time,
+                            CASE 
+                                WHEN glucose_level > 180 THEN 'High'
+                                WHEN glucose_level < 70 THEN 'Low'
+                                ELSE 'Normal'
+                            END as status
+                            FROM glucose_readings
+                            WHERE user_id = ?
+                            AND reading_time >= date('now', '-30 days')
+                            ORDER BY reading_time DESC
+                        """
+                        glucose_data = pd.read_sql_query(glucose_query, conn, params=(st.session_state.current_patient_id,))
                         
-                        with col1:
-                            st.subheader("Glucose Trends")
-                            glucose_query = """
-                                SELECT glucose_level, reading_time,
-                                CASE 
-                                    WHEN glucose_level > 180 THEN 'High'
-                                    WHEN glucose_level < 70 THEN 'Low'
-                                    ELSE 'Normal'
-                                END as status
-                                FROM glucose_readings
-                                WHERE user_id = ?
-                                AND reading_time >= date('now', '-30 days')
-                                ORDER BY reading_time DESC
-                            """
-                            glucose_data = pd.read_sql_query(glucose_query, conn, params=(patient_id,))
+                        if not glucose_data.empty:
+                            glucose_data['reading_time'] = pd.to_datetime(glucose_data['reading_time'])
                             
-                            if not glucose_data.empty:
-                                fig = px.line(glucose_data, 
-                                            x='reading_time', 
-                                            y='glucose_level',
-                                            color='status',
-                                            title='30-Day Glucose Trends')
-                                fig.add_hline(y=180, line_dash="dash", line_color="red")
-                                fig.add_hline(y=70, line_dash="dash", line_color="red")
-                                st.plotly_chart(fig, use_container_width=True)
-                                
-                                avg_glucose = glucose_data['glucose_level'].mean()
-                                high_readings = len(glucose_data[glucose_data['glucose_level'] > 180])
-                                low_readings = len(glucose_data[glucose_data['glucose_level'] < 70])
-                                
-                                st.metric("Average Glucose", f"{avg_glucose:.1f} mg/dL")
-                                col1, col2 = st.columns(2)
-                                col1.metric("High Readings", high_readings)
-                                col2.metric("Low Readings", low_readings)
-                            else:
-                                st.info("No glucose readings available for this patient")
+                            fig = px.line(glucose_data, 
+                                        x='reading_time', 
+                                        y='glucose_level',
+                                        color='status',
+                                        title='30-Day Glucose Trends')
+                            fig.add_hline(y=180, line_dash="dash", line_color="red")
+                            fig.add_hline(y=70, line_dash="dash", line_color="red")
+                            st.plotly_chart(fig, use_container_width=True)
+                            
+                            avg_glucose = glucose_data['glucose_level'].mean()
+                            high_readings = len(glucose_data[glucose_data['glucose_level'] > 180])
+                            low_readings = len(glucose_data[glucose_data['glucose_level'] < 70])
+                            
+                            metrics_col1, metrics_col2, metrics_col3 = st.columns(3)
+                            metrics_col1.metric("Average Glucose", f"{avg_glucose:.1f} mg/dL")
+                            metrics_col2.metric("High Readings", high_readings)
+                            metrics_col3.metric("Low Readings", low_readings)
+                        else:
+                            st.info("No glucose readings available for this patient")
+                    
+                    with col2:
+                        st.subheader("Recent Medications")
+                        med_query = """
+                            SELECT med_name, dosage, time_taken, date
+                            FROM medications
+                            WHERE user_id = ?
+                            ORDER BY date DESC, time_taken DESC
+                            LIMIT 10
+                        """
+                        med_data = pd.read_sql_query(med_query, conn, params=(st.session_state.current_patient_id,))
                         
-                        with col2:
-                            st.subheader("Recent Medications")
-                            med_query = """
-                                SELECT med_name, dosage, time_taken, date
-                                FROM medications
-                                WHERE user_id = ?
-                                ORDER BY date DESC, time_taken DESC
-                                LIMIT 10
-                            """
-                            med_data = pd.read_sql_query(med_query, conn, params=(patient_id,))
-                            
-                            if not med_data.empty:
-                                st.dataframe(med_data, use_container_width=True)
-                            else:
-                                st.info("No medication records available")
-                
-            except Exception as e:
-                st.error(f"An error occurred while accessing patient data: {str(e)}")
-            
-            finally:
-                if conn:
-                    conn.close()
+                        if not med_data.empty:
+                            st.dataframe(med_data, use_container_width=True)
+                        else:
+                            st.info("No medication records available")
+
+                # Tab 2: Detailed Analytics
+                with tabs[1]:
+                    detailed_analytics_tab(st.session_state.current_patient_id)
+
+                # Tab 3: Communication
+                with tabs[2]:  # Communication tab
+                    st.subheader("Patient Communication")
+                    
+                    # Get patient name for display
+                    patient_name = patients[patients['user_id'] == st.session_state.current_patient_id]['full_name'].iloc[0]
+                    st.write(f"Conversation with {patient_name}")
+                    
+                    # Updated query to properly get provider name
+                    messages = pd.read_sql_query("""
+                        SELECT 
+                            pm.message_content, 
+                            pm.sent_time, 
+                            pm.sender_type,
+                            CASE 
+                                WHEN pm.sender_type = 'provider' THEN 
+                                    (SELECT full_name FROM user_accounts WHERE user_id = pm.provider_id)
+                                WHEN pm.sender_type = 'patient' THEN 
+                                    (SELECT full_name FROM user_accounts WHERE user_id = pm.patient_id)
+                            END as sender_name,
+                            pm.provider_id,
+                            pm.patient_id
+                        FROM provider_messages pm
+                        WHERE pm.patient_id = ?
+                        ORDER BY pm.sent_time ASC
+                    """, conn, params=(st.session_state.current_patient_id,))
+                    
+                    # Create message container with custom CSS
+                    st.markdown("""
+                        <style>
+                        .provider-message {
+                            background-color: #007AFF;
+                            color: white;
+                            padding: 10px;
+                            border-radius: 15px;
+                            margin: 5px 0;
+                            max-width: 80%;
+                            margin-left: auto;
+                        }
+                        .patient-message {
+                            background-color: #E8E8E8;
+                            padding: 10px;
+                            border-radius: 15px;
+                            margin: 5px 0;
+                            max-width: 80%;
+                        }
+                        .message-name {
+                            font-size: 0.8em;
+                            margin-bottom: 2px;
+                        }
+                        .message-time {
+                            font-size: 0.7em;
+                            margin-top: 2px;
+                        }
+                        .provider-time {
+                            color: rgba(255, 255, 255, 0.8);
+                        }
+                        .patient-time {
+                            color: #666;
+                        }
+                        </style>
+                    """, unsafe_allow_html=True)
+                    
+                    # Display messages
+                    for _, msg in messages.iterrows():
+                        # For provider view, reverse the message alignment
+                        if msg['sender_type'] == 'provider':
+                            st.markdown(f"""
+                                <div class="provider-message">
+                                    <div class="message-name" style="color: rgba(255, 255, 255, 0.8);">
+                                        You
+                                    </div>
+                                    {msg['message_content']}
+                                    <div class="message-time provider-time">{msg['sent_time']}</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                        else:
+                            st.markdown(f"""
+                                <div class="patient-message">
+                                    <div class="message-name" style="color: #666;">
+                                        {patient_name}
+                                    </div>
+                                    {msg['message_content']}
+                                    <div class="message-time patient-time">{msg['sent_time']}</div>
+                                </div>
+                            """, unsafe_allow_html=True)
+                    
+                    # Message input
+                    new_message = st.text_area("Type your message")
+                    if st.button("Send"):
+                        if new_message.strip():
+                            try:
+                                conn.execute("""
+                                    INSERT INTO provider_messages 
+                                    (patient_id, provider_id, message_content, sender_type, read_status)
+                                    VALUES (?, ?, ?, 'provider', 0)
+                                """, (st.session_state.current_patient_id, 
+                                     st.session_state.provider_id, 
+                                     new_message))
+                                conn.commit()
+                                st.success("Message sent!")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Error sending message: {e}")
+
+                # Tab 4: Treatment Plans
+                with tabs[3]:
+                    st.subheader("Treatment Plan Management")
+                    try:
+                        current_plan_query = """
+                            SELECT plan_content, created_at
+                            FROM treatment_plans
+                            WHERE patient_id = ?
+                            ORDER BY created_at DESC
+                            LIMIT 1
+                        """
+                        current_plan_df = pd.read_sql_query(current_plan_query, conn, params=(patient_id,))
+                        
+                        if not current_plan_df.empty:
+                            st.text_area("Current Treatment Plan", 
+                                       value=current_plan_df['plan_content'].iloc[0],
+                                       height=200,
+                                       key="current_plan")
+                            st.caption(f"Last updated: {current_plan_df['created_at'].iloc[0]}")
+                        
+                        new_plan = st.text_area("New Treatment Plan", height=200, key="new_plan")
+                        if st.button("Update Treatment Plan", key="update_plan"):
+                            if new_plan.strip():
+                                conn.execute("""
+                                    INSERT INTO treatment_plans 
+                                    (patient_id, provider_id, plan_content)
+                                    VALUES (?, ?, ?)
+                                """, (patient_id, st.session_state.provider_id, new_plan))
+                                conn.commit()
+                                st.success("Treatment plan updated!")
+                                st.rerun()
+                    except Exception as e:
+                        st.error(f"Error in treatment plans tab: {str(e)}")
 
     except Exception as e:
         st.error(f"An error occurred: {str(e)}")
-
-        # Tab 2: Detailed Analytics
-        with tabs[1]:
-            st.subheader("Advanced Analytics")
-            
-            # Time period selection
-            period = st.selectbox(
-                "Analysis Period",
-                ["Last 7 Days", "Last 30 Days", "Last 90 Days", "Custom Range"]
-            )
-            
-            if period == "Custom Range":
-                col1, col2 = st.columns(2)
-                start_date = col1.date_input("Start Date")
-                end_date = col2.date_input("End Date")
-            
-            # Analysis type selection
-            analysis_type = st.multiselect(
-                "Select Analysis Types",
-                ["Glucose Patterns", "Medication Adherence", "Time in Range", "Correlation Analysis"]
-            )
-            
-            if "Glucose Patterns" in analysis_type:
-                st.subheader("Glucose Patterns")
-                # Add detailed glucose pattern analysis
-                
-            if "Medication Adherence" in analysis_type:
-                st.subheader("Medication Adherence")
-                # Add medication adherence analysis
-
-        # Tab 3: Communication
-        with tabs[2]:
-            st.subheader("Patient Communication")
-            
-            # Message history
-            messages = pd.read_sql_query("""
-                SELECT message_content, sent_time, sender_type
-                FROM provider_messages
-                WHERE patient_id = ?
-                ORDER BY sent_time DESC
-            """, conn, params=(patient_id,))
-            
-            if not messages.empty:
-                for _, msg in messages.iterrows():
-                    with st.chat_message(msg['sender_type']):
-                        st.write(msg['message_content'])
-                        st.caption(msg['sent_time'])
-            
-            # New message
-            new_message = st.text_area("New Message")
-            if st.button("Send Message"):
-                try:
-                    conn.execute("""
-                        INSERT INTO provider_messages 
-                        (patient_id, provider_id, message_content, sender_type)
-                        VALUES (?, ?, ?, 'provider')
-                    """, (patient_id, st.session_state.provider_id, new_message))
-                    conn.commit()
-                    st.success("Message sent!")
-                    st.experimental_rerun()
-                except Exception as e:
-                    st.error(f"Error sending message: {e}")
-
-        # Tab 4: Treatment Plans
-        with tabs[3]:
-            st.subheader("Treatment Plan Management")
-            
-            # Current treatment plan
-            current_plan = st.text_area(
-                "Current Treatment Plan",
-                height=200
-            )
-            
-            # Medication adjustments
-            st.subheader("Medication Adjustments")
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                med_name = st.selectbox("Medication", ["Insulin", "Metformin", "Other"])
-            with col2:
-                dosage = st.number_input("New Dosage")
-            with col3:
-                frequency = st.selectbox("Frequency", ["Once daily", "Twice daily", "As needed"])
-            
-            if st.button("Update Treatment Plan"):
-                # Save treatment plan updates
-                pass
-    except Exception as e:
-        st.error(f"An error occurred: {str(e)}")
-        
     finally:
-        # Safely close connection if it exists
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception as e:
-                st.error(f"Error closing database connection: {str(e)}")
+        if conn:
+            conn.close()
+
 # Enhanced settings section
 def settings():
     st.title("Settings")
@@ -848,8 +1283,8 @@ def settings():
         
         # Display preferences
         st.subheader("Display Settings")
-        theme = st.selectbox("Theme", ["Light", "Dark"])
-        glucose_unit = st.selectbox("Glucose Unit", ["mg/dL", "mmol/L"])
+        theme = st.selectbox("Theme", ["Light", "Dark"], key="theme_select")
+        glucose_unit = st.selectbox("Glucose Unit", ["mg/dL", "mmol/L"], key="unit_select")
         
         # Notification preferences
         st.subheader("Notifications")
@@ -867,6 +1302,11 @@ def main():
         layout="wide",
         initial_sidebar_state="expanded"
     )
+    conn = create_database_connection()
+    if conn:
+        create_tables(conn)
+        conn.close()
+
     initialize_session_state()
 
     if not user_auth():
@@ -889,7 +1329,7 @@ def main():
                 st.info(f"Signed in as: {st.session_state.username}")
     
     if st.session_state.username:
-        st.sidebar.write(f"Welcome, {st.session_state.username}!")
+        st.sidebar.write(f"Welcome, {st.session_state.get('full_name', st.session_state.username)}!")
     
     # Sidebar Navigation
     with st.sidebar:
@@ -903,7 +1343,10 @@ def main():
             "Settings": "⚙️",
             "Healthcare Provider": "👨‍⚕️"
         }
-        
+        # Add admin check
+        if st.session_state.get('is_admin', False):
+            pages["Admin"] = "🔧"
+
         for page, icon in pages.items():
             if st.button(f"{icon} {page}", key=f"nav_{page}"):
                 st.session_state.page = page
@@ -912,27 +1355,12 @@ def main():
         return
     # Main Content
     if st.session_state.page == "Home":
-        col1, col2 = st.columns([2, 1])
+        main_col1, main_col2 = st.columns([2, 1])
         
-        with col1:
+        with main_col1:
             # Timer and Medication Status
             current_time = datetime.now().strftime("%H:%M")
             st.header(f"🕐 {current_time}")
-            
-            if st.button("Mark as taken"):
-                st.success("Medication marked as taken!")
-                conn = create_database_connection()
-                if conn:
-                    try:
-                        with conn:
-                            conn.execute("""
-                                INSERT INTO medications 
-                                (user_id, med_name, time_taken, date)
-                                VALUES (?, 'Daily Medication', ?, ?)
-                            """, (st.session_state.user_id, datetime.now(), 
-                                  datetime.now().date()))
-                    finally:
-                        conn.close()
             
             # Streak Display
             conn = create_database_connection()
@@ -942,71 +1370,38 @@ def main():
                 conn.close()
             
             # Calendar View
-            display_medication_calendar()
-            
-            # Medication Input - Now directly showing the form instead of using an expander
-            st.subheader("Log Medication")
-            med_options = ["Insulin", "Metformin", "Glipizide", "Januvia", "Other"]
-            med_name = st.selectbox("Medication Name", med_options, key="home_med_name")
-            if med_name == "Other":
-                med_name = st.text_input("Enter medication name", key="home_med_other")
-            dosage = st.number_input("Dosage", min_value=0.0, key="home_dosage")
-            time_taken = st.time_input("Time Taken", key="home_time")
-            
-            if st.button("Log Medication", key="log_med_button"):
-                conn = create_database_connection()
-                if conn:
-                    try:
-                        time_taken_str = time_taken.strftime('%H:%M:%S')
-                        with conn:
-                            conn.execute("""
-                                INSERT INTO medications 
-                                (user_id, med_name, dosage, time_taken, date)
-                                VALUES (?, ?, ?, ?, ?)
-                            """, (st.session_state.user_id, med_name, dosage, 
-                                  time_taken_str, datetime.now().date()))
-                        st.success("Medication logged successfully!")
-                    except Exception as e:
-                        st.error(f"Error logging medication: {e}")
-                    finally:
-                        conn.close()
-        col1, col2 = st.columns([2, 1])
+            if st.session_state.authenticated and st.session_state.user_id:
+                display_medication_calendar()
+            else:
+                st.warning("Please sign in to view medication records")
         
-        with col1:
-            # Timer and Medication Status
-            current_time = datetime.now().strftime("%H:%M")
-            st.header(f"🕐 {current_time}")
-            
-            if st.button("Mark as taken", key="mark_taken_button"):
-                st.success("Medication marked as taken!")
-                conn = create_database_connection()
-                if conn:
-                    try:
-                        with conn:
-                            conn.execute("""
-                                INSERT INTO medications 
-                                (user_id, med_name, time_taken, date)
-                                VALUES (?, 'Daily Medication', ?, ?)
-                            """, (st.session_state.user_id, datetime.now(), 
-                                  datetime.now().date()))
-                    finally:
-                        conn.close()
-            
-            # Streak Display
-            conn = create_database_connection()
-            if conn:
-                streak = calculate_streak(conn, st.session_state.user_id)
-                st.metric("Current Streak", f"{streak} days", "Keep it up! 🎯")
-                conn.close()
-            
-            # Calendar View
-            display_medication_calendar()
-            
-            # Medication Input
-            with st.expander("Log Medication"):
-                medication_tracker()
+            # Quick Navigation section - now inside main_col1
+            st.markdown("---")
+            st.subheader("Quick Navigation")
         
-        with col2:
+            # Navigation buttons
+            nav_col1, nav_col2 = st.columns(2)
+            with nav_col1:
+                if st.button("📊 Glucose Tracker", key="nav_glucose", use_container_width=True):
+                    st.session_state.page = "Glucose Tracker"
+                    st.rerun()
+            
+                if st.button("👥 Community", key="nav_community", use_container_width=True):
+                    st.session_state.page = "Community"
+                    st.rerun()
+        
+            with nav_col2:
+                if st.button("💊 Medication Tracker", key="nav_medication", use_container_width=True):
+                    st.session_state.page = "Medication Tracker"
+                    st.rerun()
+            
+                if st.button("📚 Resources", key="nav_resources", use_container_width=True):
+                    st.session_state.page = "Resources"
+                    st.rerun()
+                    
+            st.markdown("---")
+            display_provider_messages_patient()
+        with main_col2:
             st.header("Awareness and Education")
             
             # Glucose Chart
@@ -1076,7 +1471,7 @@ def main():
                 - Severe side effects
                 - Unusual symptoms
                 """)
-    
+
     elif st.session_state.page == "Medication Tracker":
         medication_tracker()
     
@@ -1114,7 +1509,7 @@ def main():
             - Medical Supply Resources
             - Financial Aid Programs
             """)
-    
+        community_chat()
     elif st.session_state.page == "Healthcare Provider":
         healthcare_provider_section()
 
@@ -1176,15 +1571,14 @@ def main():
         st.subheader("Profile Settings")
         st.text_input("Name")
         st.text_input("Email")
-        st.selectbox("Preferred Language", ["English", "Spanish", "French"])
+        st.selectbox("Preferred Language", ["English", "Spanish", "French"], key="language_select")
         
         st.subheader("Medical Information")
         st.text_input("Healthcare Provider")
         st.text_input("Emergency Contact")
         
         if st.button("Save Settings", key="save_settings_button"):
-            st.success("Settings saved successfully!")
-    
+            st.success("Settings saved successfully!")    
 
 if __name__ == "__main__":
     main()
